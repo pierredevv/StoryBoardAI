@@ -123,6 +123,22 @@ const App: React.FC = () => {
       setHasApiKey(hasKey => true);
     }
   };
+  
+  // New handler for 404 Entity Not Found errors from Veo models
+  const handleApiKeyError = useCallback(async () => {
+    setHasApiKey(false); // Reset to show selection screen
+    if (window.aistudio && window.aistudio.openSelectKey) {
+        try {
+            await window.aistudio.openSelectKey();
+            setHasApiKey(true); // Assume success per instructions
+        } catch (e) {
+            console.error("Key selection failed or cancelled", e);
+            // keep hasApiKey false so user sees the connect screen
+        }
+    } else {
+        alert("API Key configuration required for this feature. Please refresh and configure a valid key.");
+    }
+  }, []);
 
   const handleAnalyze = async () => {
     if (!script.trim()) return;
@@ -351,10 +367,12 @@ const App: React.FC = () => {
                     currentRatio={aspectRatio}
                     currentResolution={resolution}
                     characters={characters}
+                    setCharacters={setCharacters}
                     undo={undo}
                     redo={redo}
                     canUndo={canUndo}
                     canRedo={canRedo}
+                    onApiKeyError={handleApiKeyError}
                 />
             )}
             

@@ -24,7 +24,8 @@ import {
     Brush,
     Move,
     Undo2,
-    Redo2
+    Redo2,
+    Save
 } from 'lucide-react';
 
 interface StoryboardProps {
@@ -34,10 +35,12 @@ interface StoryboardProps {
   currentRatio: AspectRatio;
   currentResolution: ImageResolution | null; // Null means "Standard" (Flash)
   characters: CharacterProfile[];
+  setCharacters: React.Dispatch<React.SetStateAction<CharacterProfile[]>>;
   undo: () => void;
   redo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  onApiKeyError: () => void;
 }
 
 type EditMode = 'modify' | 'expand';
@@ -49,16 +52,22 @@ export const Storyboard: React.FC<StoryboardProps> = ({
     currentRatio, 
     currentResolution,
     characters,
+    setCharacters,
     undo,
     redo,
     canUndo,
-    canRedo
+    canRedo,
+    onApiKeyError
 }) => {
   const [activeImage, setActiveImage] = useState<string | null>(null);
   const [editingPanelId, setEditingPanelId] = useState<string | null>(null);
   const [editPrompt, setEditPrompt] = useState("");
   const [editMode, setEditMode] = useState<EditMode>('modify');
   
+  // Character Editing State
+  const [editingCharIndex, setEditingCharIndex] = useState<number | null>(null);
+  const [tempCharDesc, setTempCharDesc] = useState("");
+
   // Animatic State
   const [isGeneratingAnimatic, setIsGeneratingAnimatic] = useState(false);
   const [animaticUrl, setAnimaticUrl] = useState<string | null>(null);
@@ -141,13 +150,21 @@ export const Storyboard: React.FC<StoryboardProps> = ({
 
       setPanels(prev => prev.map(p => p.id === panel.id ? { ...p, isGeneratingVideo: true } : p));
       
-      const videoUrl = await generateVideoFromImage(panel.imageUrl, currentRatio);
-      
-      setPanels(prev => prev.map(p => p.id === panel.id ? { 
-          ...p, 
-          videoUrl: videoUrl || undefined, 
-          isGeneratingVideo: false
-      } : p));
+      try {
+        const videoUrl = await generateVideoFromImage(panel.imageUrl, currentRatio);
+        setPanels(prev => prev.map(p => p.id === panel.id ? { 
+            ...p, 
+            videoUrl: videoUrl || undefined, 
+            isGeneratingVideo: false
+        } : p));
+      } catch (e: any) {
+        if (e.message && e.message.includes("Requested entity was not found")) {
+            onApiKeyError();
+        } else {
+            alert("Video generation failed. Please try again.");
+        }
+        setPanels(prev => prev.map(p => p.id === panel.id ? { ...p, isGeneratingVideo: false } : p));
+      }
   };
 
   const handleGenerateAnimatic = async () => {
@@ -161,15 +178,25 @@ export const Storyboard: React.FC<StoryboardProps> = ({
     setIsGeneratingAnimatic(true);
     setAnimaticUrl(null);
 
-    // Call service with characters
-    const url = await generateAnimatic(panels, characters);
-    
-    if (url) {
-        setAnimaticUrl(url);
-    } else {
-        alert("Failed to generate animatic. Veo sequences take time and resources.");
+    try {
+        // Call service with characters
+        const url = await generateAnimatic(panels, characters);
+        
+        if (url) {
+            setAnimaticUrl(url);
+        } else {
+            alert("Failed to generate animatic. Veo sequences take time and resources.");
+        }
+    } catch (e: any) {
+        if (e.message && e.message.includes("Requested entity was not found")) {
+            onApiKeyError();
+        } else {
+            console.error(e);
+            alert("Animatic generation failed.");
+        }
+    } finally {
+        setIsGeneratingAnimatic(false);
     }
-    setIsGeneratingAnimatic(false);
   };
 
   const handleDownloadAnimatic = async () => {
@@ -241,6 +268,13 @@ export const Storyboard: React.FC<StoryboardProps> = ({
 
   const handleTransitionChange = (panelId: string, transition: TransitionType) => {
       setPanels(prev => prev.map(p => p.id === panelId ? { ...p, transition } : p));
+  };
+
+  const saveCharacterEdit = (idx: number) => {
+      const newChars = [...characters];
+      newChars[idx].description = tempCharDesc;
+      setCharacters(newChars);
+      setEditingCharIndex(null);
   };
 
   const getAspectRatioClass = (ratio: AspectRatio) => {
@@ -339,14 +373,53 @@ export const Storyboard: React.FC<StoryboardProps> = ({
              <div className="flex items-center gap-2 mb-4">
                 <Users className="w-4 h-4 text-indigo-400" />
                 <h3 className="text-sm font-bold text-gray-300 uppercase tracking-wide">Cast Visual Profile</h3>
+                <span className="text-xs text-gray-500 ml-auto hidden sm:inline">Click descriptions to edit and fix consistency</span>
              </div>
              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                 {characters.map((char, idx) => (
-                    <div key={idx} className="bg-gray-950 border border-gray-800 rounded-lg p-3 hover:border-indigo-500/30 transition-colors group">
-                        <div className="font-bold text-indigo-200 text-sm mb-1 group-hover:text-indigo-300 transition-colors">{char.name}</div>
-                        <div className="text-xs text-gray-500 leading-snug line-clamp-3 group-hover:text-gray-400" title={char.description}>
-                            {char.description}
+                    <div key={idx} className="bg-gray-950 border border-gray-800 rounded-lg p-3 hover:border-indigo-500/30 transition-all group relative">
+                        <div className="font-bold text-indigo-200 text-sm mb-1 group-hover:text-indigo-300 transition-colors flex justify-between">
+                            {char.name}
+                            {editingCharIndex !== idx && (
+                                <Edit3 className="w-3 h-3 text-gray-600 group-hover:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
                         </div>
+                        
+                        {editingCharIndex === idx ? (
+                             <div className="relative">
+                                 <textarea
+                                    value={tempCharDesc}
+                                    onChange={(e) => setTempCharDesc(e.target.value)}
+                                    className="w-full bg-gray-900 text-xs text-gray-200 p-2 rounded border border-indigo-500/50 focus:outline-none focus:ring-1 focus:ring-indigo-500 h-24 resize-none"
+                                    autoFocus
+                                 />
+                                 <div className="flex justify-end gap-1 mt-1">
+                                     <button 
+                                        onClick={() => setEditingCharIndex(null)}
+                                        className="p-1 text-gray-400 hover:text-white"
+                                     >
+                                         <X className="w-3 h-3" />
+                                     </button>
+                                     <button 
+                                        onClick={() => saveCharacterEdit(idx)}
+                                        className="p-1 text-indigo-400 hover:text-indigo-300"
+                                     >
+                                         <Save className="w-3 h-3" />
+                                     </button>
+                                 </div>
+                             </div>
+                        ) : (
+                            <div 
+                                onClick={() => {
+                                    setTempCharDesc(char.description);
+                                    setEditingCharIndex(idx);
+                                }}
+                                className="text-xs text-gray-500 leading-snug line-clamp-3 group-hover:text-gray-400 cursor-pointer hover:bg-gray-900/50 rounded p-1 -m-1" 
+                                title="Click to edit character visual description"
+                            >
+                                {char.description}
+                            </div>
+                        )}
                     </div>
                 ))}
              </div>

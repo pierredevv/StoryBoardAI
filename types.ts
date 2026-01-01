@@ -30,6 +30,7 @@ export interface StoryPanel {
   id: string;
   panelNumber: number;
   visualDescription: string;
+  imagePrompt?: string; // Technical prompt for image generation
   shotType?: string; // e.g. "Close-up", "Wide Shot"
   dialogue: string;
   imageUrl?: string;

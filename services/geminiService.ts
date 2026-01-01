@@ -11,10 +11,16 @@ export const analyzeScript = async (scriptText: string): Promise<AnalysisResult>
   const ai = getAI();
   
   const prompt = `
-    Analyze the following movie script. 
-    1. Identify the main characters and provide a consistent visual description for each (age, hair, clothes, distinct features).
-    2. Break the script down into a sequence of storyboard panels.
-    3. For each panel, determine the best "Shot Type" (e.g., Close-up, Wide Shot, Over-the-Shoulder, Low Angle).
+    You are an expert storyboard artist and cinematographer. Analyze the following movie script. 
+    
+    1. **Character Visual Dictionary**: Identify main characters. Create a consistent, highly detailed visual description for each (Name, Age, Hair style/color, Clothing, Face features).
+    
+    2. **Scene Breakdown**: Break the script into a sequence of storyboard panels.
+    
+    3. **Technical Image Prompts**: For EACH panel, generate a 'imagePrompt'. This must be a refined, standalone technical prompt suitable for a high-end AI image generator.
+       - **Integration**: Do NOT just use the character's name. Substitute pronouns and names with the specific visual description from your dictionary (e.g., instead of "John sits", say "Medium shot of John, a 30yo man with a beard and scar wearing a brown jacket, sitting...").
+       - **Environment**: Explicitly describe the background/setting and lighting in every panel prompt.
+       - **Composition**: Include camera angle and shot type (e.g., "Low angle", "Over-the-shoulder").
     
     Script:
     ${scriptText}
@@ -45,11 +51,12 @@ export const analyzeScript = async (scriptText: string): Promise<AnalysisResult>
                   type: Type.OBJECT,
                   properties: {
                     panelNumber: { type: Type.INTEGER },
-                    visualDescription: { type: Type.STRING },
+                    visualDescription: { type: Type.STRING, description: "A readable summary of the action for the user." },
+                    imagePrompt: { type: Type.STRING, description: "The technical prompt for the AI image generator, including detailed character and environment descriptions." },
                     shotType: { type: Type.STRING },
                     dialogue: { type: Type.STRING },
                   },
-                  required: ["panelNumber", "visualDescription", "shotType"],
+                  required: ["panelNumber", "visualDescription", "imagePrompt", "shotType"],
                 },
             }
         },
@@ -87,19 +94,45 @@ export const generatePanelImage = async (
 ): Promise<string | null> => {
   const ai = getAI();
   
-  let characterContext = "";
-  characters.forEach(char => {
-      if (panel.visualDescription.includes(char.name) || panel.dialogue?.includes(char.name)) {
-          characterContext += `${char.name} looks like: ${char.description}. `;
-      }
-  });
+  // Strategy: If the user has edited the character descriptions in the UI, we want to respect that.
+  // The 'panel.imagePrompt' comes from the initial analysis. If characters have changed since then,
+  // we might need to inject the NEW descriptions.
+  
+  let finalPrompt = "";
+  
+  if (panel.imagePrompt) {
+      // Use the technical prompt from analysis as the base
+      finalPrompt = panel.imagePrompt;
+      
+      // Feedback Loop: Check if we need to enforce specific character details that might have been edited
+      // Simple string replacement strategy: ensure character names are associated with current descriptions
+      characters.forEach(char => {
+          if (finalPrompt.includes(char.name)) {
+              // Append the latest description to reinforce consistency if the name is mentioned
+              finalPrompt += ` (${char.name} is ${char.description})`;
+          }
+      });
+  } else {
+      // Fallback construction if no imagePrompt exists
+      let characterContext = "";
+      characters.forEach(char => {
+          if (panel.visualDescription.includes(char.name) || panel.dialogue?.includes(char.name)) {
+              characterContext += `${char.name} is ${char.description}. `;
+          }
+      });
+      finalPrompt = `Shot Type: ${panel.shotType}. Scene: ${panel.visualDescription}. Characters: ${characterContext}`;
+  }
 
-  const fullPrompt = `
-    Style: ${style}. 
-    Shot Type: ${panel.shotType || "Cinematic Shot"}.
-    Scene Description: ${panel.visualDescription}.
-    ${characterContext ? `Character Details: ${characterContext}` : ''}
-    Highly detailed, professional storyboard, cinematic lighting.
+  // Construct Hierarchical Cinematic Prompt
+  const structuredPrompt = `
+    [Style Specification]
+    Art Style: ${style}
+    
+    [Technical Scene Description]
+    ${finalPrompt}
+    
+    [Technical Specifications]
+    High fidelity, cinematic lighting, detailed texture, 8k resolution.
   `;
 
   // Use Pro model if resolution is specified (implies "Pro" mode), otherwise use fast model
@@ -109,7 +142,7 @@ export const generatePanelImage = async (
     const response = await ai.models.generateContent({
       model: model,
       contents: {
-        parts: [{ text: fullPrompt }],
+        parts: [{ text: structuredPrompt }],
       },
       config: {
         imageConfig: {
@@ -313,7 +346,11 @@ export const generateVideoFromImage = async (
     }
     return null;
 
-  } catch (e) {
+  } catch (e: any) {
+    // If we get a 404 (Requested entity not found), strictly rethrow so UI can prompt for key
+    if (e.message && e.message.includes("Requested entity was not found")) {
+        throw e;
+    }
     console.error("Video generation failed", e);
     return null;
   }
@@ -391,7 +428,11 @@ export const generateAnimatic = async (
         }
         return null;
 
-    } catch (e) {
+    } catch (e: any) {
+        // If we get a 404 (Requested entity not found), strictly rethrow so UI can prompt for key
+        if (e.message && e.message.includes("Requested entity was not found")) {
+            throw e;
+        }
         console.error("Animatic generation failed", e);
         return null;
     }
