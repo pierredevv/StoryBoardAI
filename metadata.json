@@ -1,0 +1,7 @@
+{
+  "name": "StoryBoard AI",
+  "description": "An AI-powered storyboard generator and creative suite. Upload scripts to generate visual panels, research with Google Search grounding, and converse with an AI director using Gemini Live.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
