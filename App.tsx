@@ -1,17 +1,88 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { analyzeScript } from './services/geminiService';
+import { parseFile } from './services/fileService';
 import { StoryPanel, AppMode, VisualStyle, AspectRatio, CharacterProfile, ImageResolution } from './types';
 import { Storyboard } from './components/Storyboard';
 import { LiveAssistant } from './components/LiveAssistant';
 import { ResearchPanel } from './components/ResearchPanel';
-import { LayoutDashboard, Mic, BookOpen, Wand2, Loader2, Sparkles, Settings2, Users, AlertCircle, Key } from 'lucide-react';
+import { LayoutDashboard, Mic, BookOpen, Wand2, Loader2, Sparkles, Settings2, Users, AlertCircle, Key, Upload, FileText } from 'lucide-react';
+
+// Custom Hook for Undo/Redo History
+function useHistory<T>(initialState: T) {
+  const [state, _setState] = useState<T>(initialState);
+  const [past, setPast] = useState<T[]>([]);
+  const [future, setFuture] = useState<T[]>([]);
+
+  const setState = useCallback((newState: T | ((prev: T) => T)) => {
+    _setState((currentState) => {
+      const nextState = typeof newState === 'function' 
+        ? (newState as (prev: T) => T)(currentState) 
+        : newState;
+      
+      setPast((prevPast) => [...prevPast, currentState]);
+      setFuture([]); // Clear future on new change
+      return nextState;
+    });
+  }, []);
+
+  const undo = useCallback(() => {
+    setPast((prevPast) => {
+      if (prevPast.length === 0) return prevPast;
+
+      const previous = prevPast[prevPast.length - 1];
+      const newPast = prevPast.slice(0, -1);
+
+      _setState((currentState) => {
+        setFuture((prevFuture) => [currentState, ...prevFuture]);
+        return previous;
+      });
+
+      return newPast;
+    });
+  }, []);
+
+  const redo = useCallback(() => {
+    setFuture((prevFuture) => {
+      if (prevFuture.length === 0) return prevFuture;
+
+      const next = prevFuture[0];
+      const newFuture = prevFuture.slice(1);
+
+      _setState((currentState) => {
+        setPast((prevPast) => [...prevPast, currentState]);
+        return next;
+      });
+
+      return newFuture;
+    });
+  }, []);
+
+  return {
+    state,
+    setState,
+    undo,
+    redo,
+    canUndo: past.length > 0,
+    canRedo: future.length > 0,
+    resetHistory: () => { setPast([]); setFuture([]); }
+  };
+}
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AppMode>(AppMode.STORYBOARD);
   const [script, setScript] = useState('');
   
-  // App State
-  const [panels, setPanels] = useState<StoryPanel[]>([]);
+  // App State with History
+  const { 
+    state: panels, 
+    setState: setPanels, 
+    undo, 
+    redo, 
+    canUndo, 
+    canRedo,
+    resetHistory 
+  } = useHistory<StoryPanel[]>([]);
+
   const [characters, setCharacters] = useState<CharacterProfile[]>([]);
   const [visualStyle, setVisualStyle] = useState<VisualStyle>(VisualStyle.CINEMATIC);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
@@ -20,11 +91,15 @@ const App: React.FC = () => {
   const [resolution, setResolution] = useState<ImageResolution | null>(null); // Null = Standard (Flash)
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [showResearch, setShowResearch] = useState(false);
   
   // API Key Selection State
   const [hasApiKey, setHasApiKey] = useState(false);
   const [isCheckingKey, setIsCheckingKey] = useState(true);
+
+  // Refs
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Check for API key on mount
   useEffect(() => {
@@ -45,7 +120,7 @@ const App: React.FC = () => {
     if (window.aistudio && window.aistudio.openSelectKey) {
       await window.aistudio.openSelectKey();
       // Assume success after dialog interaction, or re-check
-      setHasApiKey(true);
+      setHasApiKey(hasKey => true);
     }
   };
 
@@ -53,9 +128,32 @@ const App: React.FC = () => {
     if (!script.trim()) return;
     setIsAnalyzing(true);
     const result = await analyzeScript(script);
-    setPanels(result.panels);
+    
+    // When generating a fresh script, we usually want to reset the undo stack
+    // so the user doesn't undo back into an empty state or the previous script abruptly.
+    setPanels(result.panels); 
+    resetHistory(); 
+    
     setCharacters(result.characters);
     setIsAnalyzing(false);
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsImporting(true);
+    try {
+      const extractedText = await parseFile(file);
+      setScript(extractedText);
+    } catch (error) {
+      console.error("Import failed:", error);
+      alert("Failed to import file. Please ensure it is a valid .txt, .pdf, or .fdx file.");
+    } finally {
+      setIsImporting(false);
+      // Reset input value to allow re-uploading same file if needed
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   if (isCheckingKey) {
@@ -156,12 +254,28 @@ const App: React.FC = () => {
                 
                 {/* Script Input Row */}
                 <div className="flex items-start p-4 gap-4">
-                    <textarea
-                        value={script}
-                        onChange={(e) => setScript(e.target.value)}
-                        placeholder="Paste your movie script here... e.g. 'EXT. ALLEYWAY - NIGHT. Rain slicked streets...'"
-                        className="flex-1 bg-gray-950 border border-gray-800 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none h-16 lg:h-12 lg:min-h-[3rem] transition-all"
-                    />
+                    <div className="flex-1 relative">
+                        <textarea
+                            value={script}
+                            onChange={(e) => setScript(e.target.value)}
+                            placeholder="Paste your movie script here, or import a file (PDF, FDX)..."
+                            className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none h-16 lg:h-12 lg:min-h-[3rem] transition-all pr-12"
+                        />
+                        <button 
+                            onClick={() => fileInputRef.current?.click()}
+                            className="absolute right-3 top-3 text-gray-500 hover:text-indigo-400 transition-colors p-1"
+                            title="Import Script (.pdf, .fdx, .txt)"
+                        >
+                            {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                        </button>
+                        <input 
+                            type="file" 
+                            ref={fileInputRef}
+                            onChange={handleFileUpload}
+                            accept=".txt,.pdf,.fdx"
+                            className="hidden"
+                        />
+                    </div>
                     <button 
                         onClick={handleAnalyze}
                         disabled={isAnalyzing || !script.trim()}
@@ -237,6 +351,10 @@ const App: React.FC = () => {
                     currentRatio={aspectRatio}
                     currentResolution={resolution}
                     characters={characters}
+                    undo={undo}
+                    redo={redo}
+                    canUndo={canUndo}
+                    canRedo={canRedo}
                 />
             )}
             

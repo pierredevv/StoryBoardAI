@@ -12,6 +12,15 @@ export enum VisualStyle {
   CYBERPUNK = 'Cyberpunk'
 }
 
+export enum TransitionType {
+  NONE = 'None',
+  CUT = 'Hard Cut',
+  FADE = 'Fade',
+  DISSOLVE = 'Dissolve',
+  WIPE = 'Wipe',
+  SLIDE = 'Slide'
+}
+
 export interface CharacterProfile {
   name: string;
   description: string;
@@ -25,6 +34,7 @@ export interface StoryPanel {
   dialogue: string;
   imageUrl?: string;
   videoUrl?: string;
+  transition?: TransitionType;
   isGeneratingImage: boolean;
   isGeneratingVideo: boolean;
   isPlayingAudio: boolean;

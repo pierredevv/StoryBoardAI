@@ -1,4 +1,5 @@
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+
+import { GoogleGenAI, Type, Modality, VideoGenerationReferenceType } from "@google/genai";
 import { StoryPanel, AnalysisResult, CharacterProfile, VisualStyle, AspectRatio, ImageResolution } from "../types";
 
 // Helper to get AI instance. 
@@ -171,6 +172,108 @@ export const editPanelImage = async (
   }
 };
 
+// 3.5 Outpainting (Expanding Image)
+export type OutpaintDirection = 'up' | 'down' | 'left' | 'right' | 'zoom-out';
+
+export const outpaintPanelImage = async (
+  imageBase64: string,
+  direction: OutpaintDirection
+): Promise<string | null> => {
+  const ai = getAI();
+
+  // 1. Process Image on Canvas
+  const processImage = (): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { reject("No context"); return; }
+
+        let newWidth = img.width;
+        let newHeight = img.height;
+        let dx = 0;
+        let dy = 0;
+
+        const EXPANSION_FACTOR = 0.5; // Expand by 50%
+
+        switch (direction) {
+          case 'left':
+            newWidth = img.width * (1 + EXPANSION_FACTOR);
+            dx = img.width * EXPANSION_FACTOR; // Place original on the right
+            break;
+          case 'right':
+            newWidth = img.width * (1 + EXPANSION_FACTOR);
+            dx = 0; // Place original on the left
+            break;
+          case 'up':
+            newHeight = img.height * (1 + EXPANSION_FACTOR);
+            dy = img.height * EXPANSION_FACTOR; // Place original on bottom
+            break;
+          case 'down':
+            newHeight = img.height * (1 + EXPANSION_FACTOR);
+            dy = 0; // Place original on top
+            break;
+          case 'zoom-out':
+            newWidth = img.width * 1.5;
+            newHeight = img.height * 1.5;
+            dx = (newWidth - img.width) / 2;
+            dy = (newHeight - img.height) / 2;
+            break;
+        }
+
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+
+        // Draw the image on the new canvas
+        ctx.drawImage(img, dx, dy);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = reject;
+      img.src = imageBase64;
+    });
+  };
+
+  try {
+    const processedBase64 = await processImage();
+    const base64Data = processedBase64.split(',')[1];
+    
+    // 2. Send to Gemini
+    const prompt = `
+      Outpainting task: The provided image has empty space added to the ${direction}. 
+      Seamlessly fill in this empty space to expand the scene. 
+      Match the existing art style, lighting, and context perfectly. 
+      Do not change the original content, only extend it.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: base64Data,
+              mimeType: 'image/png'
+            }
+          },
+          { text: prompt }
+        ]
+      }
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData && part.inlineData.data) {
+        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+
+  } catch (e) {
+    console.error("Outpainting failed", e);
+    return null;
+  }
+};
+
 // 4. Video Generation (Veo)
 export const generateVideoFromImage = async (
   imageBase64: string,
@@ -216,7 +319,85 @@ export const generateVideoFromImage = async (
   }
 };
 
-// 5. Text to Speech
+// 5. Animatic Generation (Veo with Reference Images)
+export const generateAnimatic = async (
+    panels: StoryPanel[],
+    characters: CharacterProfile[] = []
+): Promise<string | null> => {
+    const ai = getAI();
+
+    // Veo allows up to 3 reference images in 'veo-3.1-generate-preview'
+    // We filter for panels that have images, and take the first 3.
+    const validPanels = panels.filter(p => p.imageUrl).slice(0, 3);
+    
+    if (validPanels.length < 2) return null;
+
+    const referenceImagesPayload = [];
+    
+    // Construct a rich prompt with character context for better consistency
+    let prompt = "A continuous cinematic video sequence. ";
+    
+    const characterContext = characters.map(c => `${c.name}: ${c.description}`).join('. ');
+    if (characterContext) {
+        prompt += `Characters details: ${characterContext}. `;
+    }
+
+    for (let i = 0; i < validPanels.length; i++) {
+        const p = validPanels[i];
+        if (!p.imageUrl) continue;
+
+        // Ensure clean base64
+        const base64Data = p.imageUrl.split(',')[1] || p.imageUrl;
+        const mimeType = p.imageUrl.includes(';') ? p.imageUrl.split(';')[0].split(':')[1] : 'image/png';
+
+        referenceImagesPayload.push({
+            image: {
+                imageBytes: base64Data,
+                mimeType: mimeType
+            },
+            referenceType: VideoGenerationReferenceType.ASSET
+        });
+
+        prompt += `Scene ${i + 1}: ${p.visualDescription}. `;
+        
+        // Add transition instruction if it exists and isn't the last panel
+        if (p.transition && p.transition !== 'None' && i < validPanels.length - 1) {
+            prompt += `Transition to next scene using ${p.transition} effect. `;
+        }
+    }
+
+    prompt += "Smooth motion, high quality render, consistent character appearance between shots.";
+
+    try {
+        let operation = await ai.models.generateVideos({
+            model: 'veo-3.1-generate-preview',
+            prompt: prompt,
+            config: {
+                numberOfVideos: 1,
+                referenceImages: referenceImagesPayload,
+                resolution: '720p',
+                aspectRatio: '16:9' // Strict requirement for ref images
+            }
+        });
+
+        while (!operation.done) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            operation = await ai.operations.getVideosOperation({operation: operation});
+        }
+
+        const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+        if (videoUri) {
+            return `${videoUri}&key=${process.env.API_KEY}`;
+        }
+        return null;
+
+    } catch (e) {
+        console.error("Animatic generation failed", e);
+        return null;
+    }
+};
+
+// 6. Text to Speech
 export const generateSpeech = async (text: string): Promise<ArrayBuffer | null> => {
   const ai = getAI();
   try {
@@ -251,7 +432,7 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer | null> 
   }
 };
 
-// 6. Research (Google Search Grounding)
+// 7. Research (Google Search Grounding)
 export const searchResearch = async (query: string) => {
     const ai = getAI();
     try {
